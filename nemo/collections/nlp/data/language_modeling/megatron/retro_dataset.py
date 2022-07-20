@@ -87,6 +87,8 @@ class RETRODataset(Dataset):
         self.knn_index: KNNIndex = knn_index
         self.retrieval_index: MMapRetrievalIndexedDataset = retrieval_index
         self.chunk_size = self.indexed_dataset.chunk_size
+        self.examples = [] #Jaehwan
+        self.tokenizer = tokenizer #Jaehwan
 
         # make sure seq_length is a multiple of chunk_size
         assert seq_length % self.chunk_size == 0
@@ -228,6 +230,53 @@ class RETRODataset(Dataset):
             'retrieved_emb_mask': context_mask,
             'retrieved_ids': retrieved,
         }
+#==========================JAEHWAN======================================
+
+    def get_all_examples(self, tokens_to_generate):
+        """
+        Used for loading inference data. 
+        """
+        print('$' * 100 + 'input_ids: ', self[0]['tokens'].shape)
+        print('$' * 100 + 'retrieved_ids: ', self[0]['retrieved_ids'].shape)
+        print('$' * 100 + 'tokens_mask: ', self[0]['tokens_mask'].shape)
+        print('$' * 100 + 'retrieved_emb_mask: ', self[0]['retrieved_emb_mask'].shape)
+        print('$' * 100 + 'loss_mask: ', self[0]['loss_mask'].shape)
+        input_ids = [list(self[idx]['tokens']) for idx in range(len(self))]
+        tokens_mask = torch.stack([self[idx]['tokens_mask'] for idx in range(len(self))]).cuda().to(dtype = torch.long)
+        retrieved_ids = torch.stack([self[idx]['retrieved_ids'] for idx in range(len(self))]).cuda().to(dtype = torch.long)
+        retrieved_emb_mask = torch.stack([self[idx]['retrieved_emb_mask'] for idx in range(len(self))]).cuda().to(dtype = torch.long)
+        loss_mask = [self[idx]['loss_mask'] for idx in range(len(self))]
+        def _get_all_examples(input_ids, tokens_to_generate):
+            input_lengths = torch.cuda.LongTensor([len(inputs) for inputs in input_ids])
+            batch_max = input_lengths.max().item()
+            batch_max += tokens_to_generate
+            input_ids = self.pad_batch_and_build_loss_mask(input_ids, batch_max)
+            input_ids = input_ids.cuda()
+            input_ids = torch.cuda.LongTensor(input_ids)
+            return input_ids, input_lengths
+        # print('$' * 100 + 'input_ids: ', input_ids.shape)
+        input_ids, input_lengths = _get_all_examples(input_ids, tokens_to_generate)
+        # print('$' * 100 + 'retrieved_ids: ', retrieved_ids.shape)
+        # retrieved_ids, retrieved_lengths = _get_all_examples(retrieved_ids, 0)
+
+        return (input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask)
+
+    def pad_batch_and_build_loss_mask(self, input_ids, batch_max):
+        """ Pad input_ids in batch to max batch length while building loss mask """
+        self.pad_token_id = self.tokenizer.pad_id if self.tokenizer.pad_id is not None else self.tokenizer.unk_id
+        for ids in input_ids:
+
+            # Pad to max length
+            input_length = len(ids)
+            padding_length = batch_max - input_length
+            ids.extend([self.pad_token_id] * padding_length)
+
+        # Make into torch tensors
+        input_ids = torch.tensor(input_ids, dtype=torch.long)
+
+        return input_ids   
+
+#==========================JAEHWAN======================================
 
 
 def build_train_valid_test_datasets(
@@ -464,3 +513,5 @@ def build_mock_train_valid_test_datasets(
     test_dataset = build_dataset(2, 'test')
 
     return (train_dataset, valid_dataset, test_dataset)
+
+

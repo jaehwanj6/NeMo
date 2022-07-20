@@ -14,6 +14,7 @@
 
 import re
 from typing import Optional
+from omegaconf import OmegaConf
 
 import torch
 from omegaconf.dictconfig import DictConfig
@@ -41,6 +42,16 @@ from nemo.collections.nlp.modules.common.megatron.utils import (
 from nemo.collections.nlp.modules.common.tokenizer_utils import get_nmt_tokenizer
 from nemo.collections.nlp.parts.nlp_overrides import GradScaler
 from nemo.utils import AppState, logging
+
+#==================================JAEHWAN IMPORT===============================
+from typing import Any, List, Optional, Union
+from nemo.collections.nlp.modules.common.transformer.text_generation import LengthParam, SamplingParam, TextGeneration
+from nemo.collections.nlp.modules.common.text_generation_utils import (
+    get_default_length_params,
+    get_default_sampling_params,
+    megatron_gpt_generate,
+    megatron_retro_generate
+)
 
 try:
     from apex.transformer.enums import ModelType
@@ -87,6 +98,8 @@ class MegatronRetrievalModel(MegatronBaseModel):
             raise ValueError('precision must be in [32, 16, "bf16"]')
         self.model.model_type = ModelType.encoder_and_decoder
         # self.grad_clip_pl_default = True
+
+        self.generation_set_up() # Jaehwan Added
 
     def _build_tokenizer(self):
         self.tokenizer = get_nmt_tokenizer(
@@ -291,13 +304,17 @@ class MegatronRetrievalModel(MegatronBaseModel):
         return averaged_loss
 
     def test_step(self, batch, batch_idx):
+        # print('-' * 100 + 'in test step!!')
+        self.generate()
+        # assert(1==0)
         return self.validation_step(batch, batch_idx)
 
     def test_epoch_end(self, outputs):
         averaged_loss = average_losses_across_data_parallel_group(outputs)
         logging.info(f'test_loss: {averaged_loss[0]}')
+        self.log('perplexity', torch.exp(torch.stack(outputs).mean()), prog_bar=True)
         self.log(
-            'consumed_samples', self.compute_consumed_samples(self.trainer.global_step - self.init_global_step),
+            'consumed_samples', self.compute_consumed_samples(self.trainer.global_step - 0),
         )
         return averaged_loss
 
@@ -437,3 +454,147 @@ class MegatronRetrievalModel(MegatronBaseModel):
 
     def list_available_models(self):
         pass
+
+#============================================= JAEHWAN IMPLEMENTED ====================================
+    def generation_set_up(self):
+        config = OmegaConf.load('/workspace/NeMo/examples/nlp/language_modeling/conf/megatron_gpt_inference.yaml')
+        inference_config = config.inference
+        self.length_params: LengthParam = {
+            "max_length": inference_config["tokens_to_generate"],
+            "min_length": inference_config["min_tokens_to_generate"],
+        }
+
+        self.sampling_params: SamplingParam = {
+            "use_greedy": inference_config["greedy"],
+            "temperature": inference_config["temperature"],
+            "top_k": inference_config["top_k"],
+            "top_p": inference_config["top_p"],
+            "repetition_penalty": inference_config["repetition_penalty"],
+            "add_BOS": inference_config["add_BOS"],
+            "all_probs": inference_config["all_probs"],
+            "compute_logprob": inference_config["compute_logprob"],
+        }
+        self.pseudo_token_ids = set()
+        self.pad_token_id = self.tokenizer.pad_id if self.tokenizer.pad_id is not None else self.tokenizer.unk_id
+
+    def generate(
+        self
+    ):
+        # check whether the DDP is initialized
+        if parallel_state.is_unitialized():
+
+            def dummy():
+                return
+
+            if self.trainer.strategy.launcher is not None:
+                self.trainer.strategy.launcher.launch(dummy, trainer=self.trainer)
+            self.trainer.strategy.setup_environment()
+
+        # set the default sampling params if it is None.
+        # default do greedy sampling
+
+        self.generation_set_up()
+
+        processed_inputs = self._test_ds.get_all_examples(tokens_to_generate=self.length_params['max_length'])
+        # self.frozen_model.model.parallel_output = False
+
+        # Call same generate code as in MegatronGPT
+        return megatron_retro_generate(
+            self.cuda(), processed_inputs, self.tokenizer, self.length_params, self.sampling_params
+        )
+
+    def get_forward_output_only_func(self):
+        def fwd_output_only_func(batch, model):
+            extra_arg = {}
+            (input_ids, 
+            input_attn_mask, 
+            position_ids, 
+            set_inference_key_value_memory, 
+            inference_max_sequence_len, 
+            retrieved_ids, 
+            tokens_mask, 
+            retrieved_emb_mask)= batch
+            input_ids = input_ids.cuda()
+            input_attn_mask = input_attn_mask.cuda()
+            position_ids = position_ids.cuda()
+            retrieved_ids = retrieved_ids.cuda()
+            tokens_mask = tokens_mask.cuda()
+            retrieved_emb_mask = retrieved_emb_mask.cuda()
+            extra_arg['set_inference_key_value_memory'] = set_inference_key_value_memory[0].item()
+            extra_arg['inference_max_sequence_len'] = inference_max_sequence_len[0].item()
+
+
+            output_tensor = model(input_ids, input_attn_mask, retrieved_ids, retrieved_emb_mask,  **extra_arg)
+
+            def id_func(output_tensor):
+                return output_tensor, {'logits': output_tensor}
+
+            return output_tensor, id_func
+
+        return fwd_output_only_func
+
+    def pad_batch_and_build_loss_mask(self, input_ids, batch_max, answer_starts):
+        """ Pad input_ids in batch to max batch length while building loss mask """
+        batch_loss_masks = []
+        for ids, answer_start_idx in zip(input_ids, answer_starts):
+            if answer_start_idx is not None:
+                # Loss mask where answer tokens are 1.0 and all other tokens are 0.0
+                loss_mask = [float(idx >= answer_start_idx) for idx in range(len(ids))]
+            else:
+                # Loss mask where virtual tokens are 0.0 and all other tokens are 1.0
+                loss_mask = [float(token_id not in self.pseudo_token_ids) for token_id in ids]
+
+            # Pad to max length
+            input_length = len(ids)
+            padding_length = batch_max - input_length
+            ids.extend([self.pad_token_id] * padding_length)
+
+            # Account for padding in loss mask
+            loss_mask.extend([0.0] * padding_length)
+            batch_loss_masks.append(torch.tensor(loss_mask, dtype=torch.float))
+
+        # Make into torch tensors
+        input_ids = torch.tensor(input_ids, dtype=torch.long)
+        batch_loss_masks = torch.stack(batch_loss_masks)
+
+        return input_ids, batch_loss_masks
+            # input_ids=input_ids,
+            # input_attn_mask=input_attn_mask,
+            # retrieved_ids=retrieved_ids,
+            # retrieved_attn_mask=retrieved_attn_mask,
+            # token_type_ids=token_type_ids,
+            # labels=labels,
+            # input_emb=input_emb,
+    # def get_forward_output_only_func(self):
+    #     def fwd_output_only_func(batch, model):
+            
+    #         (
+    #             input_ids,
+    #             input_attn_mask,
+    #             retrieved_ids,
+    #             retrieved_attn_mask, 
+    #             token_type_ids, 
+    #             input_emb,
+    #             set_inference_key_value_memory,
+    #             inference_max_sequence_len,
+    #         ) = batch
+    #         input_ids = input_ids.cuda()
+    #         input_attn_mask = input_attn_mask.cuda()
+    #         retrieved_ids = retrieved_ids.cuda()
+    #         retrieved_attn_mask = retrieved_attn_mask.cuda()
+    #         input_emb = input_emb.cuda()
+    #         token_type_ids = token_type_ids.cuda()
+    #         # attention_mask = attention_mask[0:1]
+    #         extra_arg = {}
+    #         extra_arg['set_inference_key_value_memory'] = set_inference_key_value_memory[0].item()
+    #         extra_arg['inference_max_sequence_len'] = inference_max_sequence_len[0].item()
+    #         output_tensor = model(input_ids, input_attn_mask, retrieved_ids,retrieved_attn_mask,input_emb,token_type_ids  **extra_arg)
+
+    #         def id_func(output_tensor):
+    #             return output_tensor, {'logits': output_tensor}
+
+    #         return output_tensor, id_func
+
+    #     return fwd_output_only_func
+
+

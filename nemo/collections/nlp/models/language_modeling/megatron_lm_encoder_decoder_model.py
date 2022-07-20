@@ -937,3 +937,9 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
 
     def list_available_models(self):
         pass
+
+    #JAEHWAN================================================================================
+
+    def set_input_tensor(self, input_tensor): 
+        print('$' * 100 + 'HERE!!')
+        return self.enc_dec_model.set_input_tensor(input_tensor)

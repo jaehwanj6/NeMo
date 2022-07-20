@@ -781,6 +781,12 @@ class MegatronGPTPromptLearningModel(MegatronBaseModel, TextGeneration):
         self.frozen_model.model.parallel_output = False
 
         # Call same generate code as in MegatronGPT
+        print('$' * 50)
+        print(task_ids)
+        print(processed_inputs[0].shape)
+        print(processed_inputs[1].shape)
+        print('$' * 50)
+        assert(1 == 0)
         return megatron_gpt_generate(
             self.cuda(), processed_inputs, self.tokenizer, length_params, sampling_params, task_ids
         )

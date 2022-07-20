@@ -65,6 +65,25 @@ def get_default_length_params():
 
     return length_params
 
+def megatron_retro_generate(model, inputs, tokenizer, length_params, sampling_params, task_ids=None):
+    print('megatron_retro_generate')
+    # reproduce the old compute_prob method
+    # a very special case
+    (input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask) = inputs
+    output = generate_retro(
+        model,
+        inputs=inputs,
+        tokens_to_generate=length_params['max_length'],
+        all_probs=sampling_params['all_probs'],
+        temperature=sampling_params['temperature'],
+        add_BOS=sampling_params['add_BOS'],
+        top_k=sampling_params['top_k'],
+        top_p=sampling_params['top_p'],
+        greedy=sampling_params['use_greedy'],
+        repetition_penalty=sampling_params['repetition_penalty'],
+        min_tokens_to_generate=length_params['min_length'],
+    )
+    return output
 
 def megatron_gpt_generate(model, inputs, tokenizer, length_params, sampling_params, task_ids=None):
     # reproduce the old compute_prob method
@@ -96,6 +115,7 @@ def megatron_gpt_generate(model, inputs, tokenizer, length_params, sampling_para
 
     if isinstance(inputs, (list, tuple)):
         if isinstance(inputs[0], (str, torch.Tensor)):
+            print(inputs[0])
             output = generate(
                 model,
                 inputs=inputs,
@@ -534,6 +554,283 @@ def generate(
         output['offsets'] = all_offsets
         return output
 
+def send_generate_retro_info(
+    input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask,
+    task_ids,
+    tokens_to_generate,
+    all_probs,
+    temperature,
+    top_k,
+    top_p,
+    greedy,
+    repetition_penalty,
+    min_tokens_to_generate,
+):
+    """
+    Needs to be synced up with receive_generate_info
+    """
+    print('send_generate_retro_info')
+    # Send the sizes of the tensors
+    input_info = [
+        input_ids.size(0),  # batch_size
+        input_ids.size(1),  # seq_len
+        tokens_to_generate,
+        all_probs,
+        temperature,
+        top_k,
+        top_p,
+        greedy,
+        repetition_penalty,
+        min_tokens_to_generate,
+    ]
+    input_info_tensor = torch.cuda.FloatTensor(input_info)
+    torch.distributed.broadcast(input_info_tensor, 0)
+
+    # Send variables to all ranks
+    #input_ids, input_lengths, retrieved_ids, retrieved_lengths, tokens_mask, retrieved_emb_mask
+    print(input_ids.shape)
+    print(retrieved_ids.shape)
+    torch.distributed.broadcast(input_ids, 0)
+    torch.distributed.broadcast(input_lengths, 0)
+    torch.distributed.broadcast(retrieved_ids, 0)
+    torch.distributed.broadcast(tokens_mask, 0)
+    torch.distributed.broadcast(retrieved_emb_mask, 0)
+    torch.distributed.broadcast(task_ids, 0)
+
+
+def receive_generate_retro_info():
+    """
+    Needs to be synced up with send_generate_info
+    """
+    print('receive_generate_retro_info')
+    input_info_tensor = torch.empty(10, dtype=torch.float32, device=torch.cuda.current_device())
+    torch.distributed.broadcast(input_info_tensor, 0)
+    batch_size = int(input_info_tensor[0].item())
+    seq_len = int(input_info_tensor[1].item())
+    tokens_to_generate = int(input_info_tensor[2].item())
+    all_probs = bool(input_info_tensor[3].item())
+    temperature = float(input_info_tensor[4].item())
+    top_k = int(input_info_tensor[5].item())
+    top_p = float(input_info_tensor[6].item())
+    greedy = bool(input_info_tensor[7].item())
+    repetition_penalty = float(input_info_tensor[8].item())
+    min_tokens_to_generate = int(input_info_tensor[9].item())
+
+    #input_ids, input_lengths, retrieved_ids, retrieved_lengths, tokens_mask, retrieved_emb_mask,
+    input_ids = torch.empty(batch_size, seq_len, dtype=torch.int64, device=torch.cuda.current_device())
+    input_lengths = torch.empty(batch_size, dtype=torch.int64, device=torch.cuda.current_device())
+    retrieved_ids = torch.empty(batch_size, 32, 2, 128, dtype=torch.int64, device=torch.cuda.current_device())
+    tokens_mask = torch.empty(batch_size, seq_len, dtype=torch.int64, device=torch.cuda.current_device())
+    retrieved_emb_mask = torch.empty(batch_size, 32, 2, 128, dtype=torch.int64, device=torch.cuda.current_device())
+    task_ids = torch.empty(batch_size, dtype=torch.int64, device=torch.cuda.current_device())
+
+    # Send variables to all ranks
+    torch.distributed.broadcast(input_ids, 0)
+    torch.distributed.broadcast(input_lengths, 0)
+    torch.distributed.broadcast(retrieved_ids, 0)
+    torch.distributed.broadcast(tokens_mask, 0)
+    torch.distributed.broadcast(retrieved_emb_mask, 0)
+    torch.distributed.broadcast(task_ids, 0)
+
+    return (
+        input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask,
+        task_ids,
+        tokens_to_generate,
+        all_probs,
+        temperature,
+        top_k,
+        top_p,
+        greedy,
+        repetition_penalty,
+        min_tokens_to_generate,
+    )
+
+
+def synced_generate_retro(
+    model,
+    input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask,
+    task_ids,
+    tokens_to_generate,
+    all_probs,
+    temperature,
+    top_k=0,
+    top_p=0.0,
+    greedy=False,
+    repetition_penalty=1.2,
+    min_tokens_to_generate=0,
+):
+    print('synced_generate_retro')
+    context_length = input_ids.min().item()
+    tokenizer = model.tokenizer
+    tokens, attention_mask, position_ids = get_batch(model, tokenizer, input_ids)
+    if isinstance(tokenizer, TabularTokenizer):
+        raise NotImplementedError()
+    else:
+        batch_token_iterator = sample_sequence_batch_retro(
+            model,
+            input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask,
+            task_ids,
+            attention_mask,
+            position_ids,
+            tokens_to_generate,
+            all_probs,
+            temperature=temperature,
+            extra={
+                "top_p": top_p,
+                "top_k": top_k,
+                "greedy": greedy,
+                "repetition_penalty": repetition_penalty,
+                "min_tokens_to_generate": min_tokens_to_generate,
+            },
+        )
+
+    for tokens, lengths, output_logits, full_logits in batch_token_iterator:
+        context_length += 1
+
+    if parallel_state.is_pipeline_last_stage():
+        src = parallel_state.get_pipeline_model_parallel_last_rank()
+        group = parallel_state.get_embedding_group()
+        torch.distributed.broadcast(output_logits, src, group)
+        if all_probs:
+            src = parallel_state.get_pipeline_model_parallel_last_rank()
+            group = parallel_state.get_embedding_group()
+            torch.distributed.broadcast(full_logits, src, group)
+
+    else:
+        if parallel_state.is_pipeline_first_stage():
+            src = parallel_state.get_pipeline_model_parallel_last_rank()
+            group = parallel_state.get_embedding_group()
+            output_logits = torch.empty(
+                tokens.size(0), context_length - 1, dtype=torch.float32, device=torch.device("cuda")
+            )
+            torch.distributed.broadcast(output_logits, src, group)
+
+            if all_probs:
+                src = parallel_state.get_pipeline_model_parallel_last_rank()
+                group = parallel_state.get_embedding_group()
+                full_logits = torch.empty(
+                    tokens.size(0),
+                    context_length - 1,
+                    model.padded_vocab_size,
+                    dtype=torch.float32,
+                    device=torch.device("cuda"),
+                )
+                torch.distributed.broadcast(full_logits, src, group)
+    if tokens is not None:
+        return tokens[:, :context_length], output_logits, full_logits
+
+def generate_retro(
+    model,
+    inputs=None,
+    task_ids=None,
+    tokens_to_generate=0,
+    all_probs=False,
+    temperature=1.0,
+    add_BOS=False,
+    top_k=0,
+    top_p=0.0,
+    greedy=False,
+    repetition_penalty=1.0,
+    min_tokens_to_generate=0,
+) -> OutputType:
+
+    print('generated retro')
+    model.eval()
+    tokenizer = model.tokenizer
+    if torch.distributed.get_rank() == 0:
+        if isinstance(inputs, tuple):
+            input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask = inputs
+        else:
+            raise NotImplementedError("not implemented for retro generation")
+            context_tokens_tensor, context_length_tensor = tokenize_batch(
+                tokenizer, inputs, tokens_to_generate, add_BOS
+            )
+        if task_ids is None:
+            # Make a dummy tensor of -1s that won't be used during generation
+            task_ids = torch.neg(torch.ones(input_ids.size(0), dtype=torch.int64))
+            task_ids = task_ids.to(device=input_ids.get_device())
+
+        send_generate_retro_info(
+            input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask,
+            task_ids,
+            tokens_to_generate,
+            all_probs,
+            temperature,
+            top_k,
+            top_p,
+            greedy,
+            repetition_penalty,
+            min_tokens_to_generate,
+        )
+    else:
+        (
+            input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask,
+            task_ids,
+            tokens_to_generate,
+            all_probs,
+            temperature,
+            top_k,
+            top_p,
+            greedy,
+            repetition_penalty,
+            min_tokens_to_generate,
+        ) = receive_generate_retro_info()
+
+    output = synced_generate_retro(
+        model,
+        input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask,
+        task_ids,
+        tokens_to_generate,
+        all_probs,
+        temperature,
+        top_k=top_k,
+        top_p=top_p,
+        greedy=greedy,
+        repetition_penalty=repetition_penalty,
+        min_tokens_to_generate=min_tokens_to_generate,
+    )
+    if output is not None:
+        decode_tokens, output_logits, full_logits = output
+        resp_sentences = []
+        resp_sentences_seg = []
+
+        decode_tokens = decode_tokens.cpu().numpy().tolist()
+        for decode_token in decode_tokens:
+            sentence = tokenizer.ids_to_text(decode_token)
+            resp_sentences.append(sentence)
+            if not isinstance(tokenizer, TabularTokenizer):
+                words = []
+                for token in decode_token:
+                    # Skip any soft prompt pseudo tokens
+                    if token not in tokenizer.tokenizer.decoder:
+                        continue
+                    word = tokenizer.tokenizer.decoder[token]
+                    word = bytearray([tokenizer.tokenizer.byte_decoder[c] for c in word]).decode(
+                        'utf-8', errors='replace'
+                    )
+                    words.append(word)
+                resp_sentences_seg.append(words)
+            else:
+                words = tokenizer.text_to_tokens(sentence)
+                resp_sentences_seg.append(words)
+        # offsets calculation
+        all_offsets = []
+        for item in resp_sentences_seg:
+            offsets = [0]
+            for index, token in enumerate(item):
+                if index != len(item) - 1:
+                    offsets.append(len(token) + offsets[-1])
+            all_offsets.append(offsets)
+
+        output = {}
+        output['sentences'] = resp_sentences
+        output['tokens'] = resp_sentences_seg
+        output['logprob'] = output_logits
+        output['full_logprob'] = full_logits
+        output['token_ids'] = decode_tokens
+        output['offsets'] = all_offsets
+        return output
+
 
 def switch(val1, val2, boolean):
     boolean = boolean.type_as(val1)
@@ -551,26 +848,48 @@ def forward_step(model, batch, tensor_shape):
     # Should call GPTModel's forward method
     else:
         forward_model = model.model
+    (input_ids, 
+    input_attn_mask, 
+    position_ids, 
+    set_inference_key_value_memory, 
+    inference_max_sequence_len, 
+    retrieved_ids, 
+    tokens_mask, 
+    retrieved_emb_mask)= batch
+    input_ids = input_ids.cuda()
+    print(input_ids.device)
+    print(input_attn_mask.device)
+    print(position_ids.device)
+    print(retrieved_ids.device)
+    print(tokens_mask.device)
+    print(retrieved_emb_mask.device)
+    # input_ids = input_ids.cuda()
+    # input_attn_mask = input_attn_mask.cuda()
+    # position_ids = position_ids.cuda()
+    # retrieved_ids = retrieved_ids.cuda()
+    # tokens_mask = tokens_mask.cuda()
+    # retrieved_emb_mask = retrieved_emb_mask.cuda()
+    output_tensor = forward_model(input_ids, input_attn_mask, retrieved_ids, retrieved_emb_mask)
 
-    if model.cfg.get('pipeline_model_parallel_size', 1) > 1:
-        output_tensor = forward_backward_pipelining_without_interleaving(
-            forward_step_func=model.get_forward_output_only_func(),
-            batch=batch,
-            model=forward_model,
-            forward_only=True,
-            tensor_shape=tensor_shape,
-            dtype=model.autocast_dtype,
-        )
-    else:
-        output_tensor = forward_backward_no_pipelining(
-            forward_step_func=model.get_forward_output_only_func(),
-            batch=batch,
-            model=forward_model,
-            forward_only=True,
-            tensor_shape=tensor_shape,
-            dtype=model.autocast_dtype,
-        )
-    return output_tensor
+    # if model.cfg.get('pipeline_model_parallel_size', 1) > 1:
+    #     output_tensor = forward_backward_pipelining_without_interleaving(
+    #         forward_step_func=model.get_forward_output_only_func(),
+    #         batch=batch,
+    #         model=forward_model,
+    #         forward_only=True,
+    #         tensor_shape=tensor_shape,
+    #         dtype=model.autocast_dtype,
+    #     )
+    # else:
+    #     output_tensor = forward_backward_no_pipelining(
+    #         forward_step_func=model.get_forward_output_only_func(),
+    #         batch=batch,
+    #         model=forward_model,
+    #         forward_only=True,
+    #         tensor_shape=tensor_shape,
+    #         dtype=model.autocast_dtype,
+    #     )
+    # return output_tensor
 
 
 def sample_sequence_batch(
@@ -683,6 +1002,191 @@ def sample_sequence_batch(
                     log_probs = F.softmax(logits, dim=-1)
                     prev = torch.multinomial(log_probs, num_samples=1).view(-1)
                 started = context_lengths <= context_length
+
+                # Clamp the predicted out of vocabulary tokens
+                prev = torch.clamp(prev, max=tokenizer.vocab_size - 1)
+                new_tokens = switch(tokens[:, context_length].view(-1), prev, started)
+
+                # Replace sampled tokens w/ done token if EOD has already been sampled
+                new_tokens = switch(new_tokens, eod_id, is_done)
+
+                # Replace special soft prompt token ids with unk token ids
+                if isinstance(model, MegatronGPTPromptLearningModel):
+                    pseudo_token_ids_start = model.pseudo_token_ids_start
+                    new_tokens[(new_tokens >= pseudo_token_ids_start)] = tokenizer.unk_id
+                    tokens[:, :context_length][
+                        (tokens[:, :context_length] >= pseudo_token_ids_start)
+                    ] = tokenizer.unk_id
+
+                # Insert either new predicted or next prompt token
+                tokens[:, context_length] = new_tokens
+
+                if output_logits is None:
+                    output = F.log_softmax(output[:, :context_length, :], 2)
+                    indices = torch.unsqueeze(tokens[:, 1 : context_length + 1], 2)
+                    output_logits = torch.gather(output, 2, indices).squeeze(2)
+                    all_generated_indices = indices[:, :, 0]
+                    if all_probs:
+                        full_logits = output
+                else:
+                    output = F.log_softmax(output, 2)
+                    indices = torch.unsqueeze(new_tokens, 1).unsqueeze(2)
+                    new_output_logits = torch.gather(output, 2, indices).squeeze(2)
+
+                    # TODO(rprenger) we're copying output_logits every time.  Should pre-allocate
+                    output_logits = torch.cat([output_logits, new_output_logits], 1)
+                    all_generated_indices = torch.cat([all_generated_indices, indices[:, :, 0]], 1)
+                    if all_probs:
+                        full_logits = torch.cat([full_logits, output], 1)
+
+                src = parallel_state.get_pipeline_model_parallel_last_rank()
+                group = parallel_state.get_embedding_group()
+                torch.distributed.broadcast(new_tokens, src, group)
+
+                done_token = (prev == eod_id).byte() & started.byte()
+                just_finished = (done_token & ~is_done).bool()
+                lengths[just_finished.view(-1)] = context_length
+                is_done = is_done | done_token
+
+                done = torch.all(is_done)
+                src = parallel_state.get_pipeline_model_parallel_last_rank()
+                group = parallel_state.get_pipeline_model_parallel_group()
+                torch.distributed.broadcast(done, src, group)
+                if all_probs:
+                    yield tokens, lengths, output_logits, full_logits
+                else:
+                    yield tokens, lengths, output_logits, None
+
+            else:
+                if parallel_state.is_pipeline_first_stage():
+                    src = parallel_state.get_pipeline_model_parallel_last_rank()
+                    group = parallel_state.get_embedding_group()
+                    new_tokens = torch.empty_like(tokens[:, context_length])
+                    torch.distributed.broadcast(new_tokens, src, group)
+                    tokens[:, context_length] = new_tokens
+                    yield tokens, None, None, None
+                else:
+                    yield None, None, None, None
+
+                done = torch.cuda.ByteTensor([0])
+                src = parallel_state.get_pipeline_model_parallel_last_rank()
+                group = parallel_state.get_pipeline_model_parallel_group()
+                torch.distributed.broadcast(done, src, group)
+
+            context_length += 1
+            counter += 1
+            if done:
+                break
+
+def sample_sequence_batch_retro(
+    model,
+    input_ids, input_lengths, retrieved_ids, tokens_mask, retrieved_emb_mask,
+    task_ids,
+    attention_mask,
+    position_ids,
+    tokens_to_generate,
+    all_probs=False,
+    type_ids=None,
+    temperature=None,
+    extra={},
+):
+    # Importing here to avoid circular import errors
+    from nemo.collections.nlp.models.language_modeling import megatron_retrieval_model, MegatronGPTPromptLearningModel
+    print('sample_sequence_batch_retro')
+    app_state = AppState()
+    micro_batch_size = input_ids.shape[0]
+    _reconfigure_microbatch_calculator(
+        rank=app_state.global_rank,
+        rampup_batch_size=None,
+        global_batch_size=micro_batch_size,
+        micro_batch_size=micro_batch_size,
+        data_parallel_size=1,
+    )
+    tokenizer = model.tokenizer
+    model.eval()
+    with torch.no_grad():
+        context_length = input_ids.min().item()
+
+        # added eos_id to support the function generate_samples_eval that passes
+        # eos_id as an argument and needs termination when that id id found.
+        eod_id = tokenizer.eos_id
+        counter = 0
+
+        batch_size = input_ids.size(0)
+        is_done = torch.zeros([batch_size]).byte().cuda()
+        tokens = input_ids
+        output_logits = None
+        all_generated_indices = None  # used to track all generated indices
+        # Generate enough tokens for the longest sequence
+        maxlen = tokens_to_generate + input_ids.max().item()
+
+        if maxlen > model.cfg.encoder_seq_length + 1:
+            maxlen = model.cfg.encoder_seq_length + 1
+
+        lengths = torch.ones([batch_size]).long().cuda() * maxlen
+
+        while context_length < maxlen:
+            # types2use = None
+            if counter == 0:
+                # Allocate memory for the entire context.
+                set_inference_key_value_memory = True
+                tokens2use = tokens[:, :context_length]
+                positions2use = position_ids[:, :context_length]
+                # not using type2use. uncomment it if it is used
+                # if type_ids is not None:
+                #     types2use = type_ids[:, :context_length]
+            else:
+                # Set this to false so the memory is not reallocated.
+                set_inference_key_value_memory = False
+                tokens2use = tokens[:, context_length - 1].view(batch_size, -1)
+                positions2use = position_ids[:, context_length - 1].view(batch_size, -1)
+                # not using type2use. uncomment it if it is used
+                # if type_ids is not None:
+                #     types2use = type_ids[:, context_length - 1].view(batch_size, -1)
+
+            attention_mask_repeat = torch.concat([attention_mask for _ in range(micro_batch_size)])
+            setkey_value_array = torch.tensor(
+                [set_inference_key_value_memory] * micro_batch_size, device=torch.cuda.current_device()
+            )
+            len_array = torch.tensor([maxlen] * micro_batch_size, device=torch.cuda.current_device())
+
+            # Only prompt learning models will have a prompt table, and require task ids
+            if isinstance(model, MegatronGPTPromptLearningModel):
+                batch = [tokens2use, attention_mask_repeat, positions2use, task_ids, setkey_value_array, len_array]
+                tensor_shape = [tokens2use.shape[1], micro_batch_size, model.frozen_model.cfg.hidden_size]
+            else:
+                batch = [tokens2use, attention_mask_repeat, positions2use, setkey_value_array, len_array, retrieved_ids, tokens_mask, retrieved_emb_mask]
+                tensor_shape = [tokens2use.shape[1], micro_batch_size, model.cfg.hidden_size]
+
+            output = forward_step(model, batch, tensor_shape)
+
+            if parallel_state.is_pipeline_last_stage():
+                output = output[0]['logits'].float()
+                output = tensor_parallel.gather_from_tensor_model_parallel_region(output)
+                assert output is not None
+                output = output.float()
+                logits = output[:, -1].view(batch_size, -1).contiguous()
+
+                # make sure it will generate at least min_length
+                min_length = extra.get('min_tokens_to_generate', 0)
+                if min_length > 0:
+                    within_min_length = (context_length - input_lengths) < min_length
+                    logits[within_min_length, eod_id] = -float('Inf')
+
+                # make sure it won't sample outside the vocab_size range
+                logits[:, tokenizer.vocab_size :] = -float('Inf')
+
+                if extra.get('greedy', False):
+                    prev = torch.argmax(logits, dim=-1).view(-1)
+                else:
+                    logits = logits.float()
+                    logits /= temperature
+                    # handle repetition penality
+                    logits = repetition_penalty(logits, extra.get('repetition_penalty', 1.2), all_generated_indices)
+                    logits = top_k_logits(logits, top_k=extra.get('top_k', 0), top_p=extra.get('top_p', 0.9))
+                    log_probs = F.softmax(logits, dim=-1)
+                    prev = torch.multinomial(log_probs, num_samples=1).view(-1)
+                started = input_lengths <= context_length
 
                 # Clamp the predicted out of vocabulary tokens
                 prev = torch.clamp(prev, max=tokenizer.vocab_size - 1)

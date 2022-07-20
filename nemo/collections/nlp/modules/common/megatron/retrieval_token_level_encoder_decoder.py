@@ -434,3 +434,4 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
         self.pre_decoder.load_state_dict(state_dict[self._pre_decoder_key], strict=strict)
         self.post_decoder.load_state_dict(state_dict[self._post_decoder_key], strict=strict)
         self.tokens_head.load_state_dict(state_dict[self._tokens_head_key], strict=strict)
+
