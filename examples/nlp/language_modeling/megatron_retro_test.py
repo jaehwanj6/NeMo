@@ -35,15 +35,8 @@ if not torch.cuda.is_available():
     raise EnvironmentError("GPU is needed for the inference")
 
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
+
 @hydra_runner(config_path="conf", config_name="megatron_retro_config")
-=======
-@hydra_runner(config_path="conf", config_name="megatron_retro_mutransfer")
->>>>>>> Stashed changes
-=======
-@hydra_runner(config_path="conf", config_name="megatron_retro_mutransfer")
->>>>>>> Stashed changes
 def main(cfg) -> None:
 
     # trainer required for restoring model parallel models
