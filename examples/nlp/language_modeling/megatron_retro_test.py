@@ -46,12 +46,12 @@ def main(cfg) -> None:
         OmegaConf.set_struct(model.cfg, False)
         model.cfg.data.neighbors = k
         model.cfg.data.data_prefix = ['/shared-volume/retro_wei_wiki_text_document']
-        model.cfg.data.knn_index = [' '.join(['/shared-volume/knn_map_wei_wiki_50_start_{}.idx'.format(el) for el in range(0, 1321, 60)])]
+        # model.cfg.data.knn_index = [' '.join(['/shared-volume/knn_map_wei_wiki_50_start_{}.idx'.format(el) for el in range(0, 1321, 60)])]
         # model.cfg.data.knn_index = ['/shared-volume/knn_map_wei_wiki.idx']
-        # model.cfg.data.knn_index = ['/shared-volume/knn_final.save']
+        model.cfg.data.knn_index = ['/shared-volume/knn_final.save']
         model.cfg.data.retrieval_prefix = '/shared-volume/retro_wei_wiki_text_document'
         # model.cfg.data.knn_map_size = -1
-        model.cfg.data.knn_map_size = 3072000
+        # model.cfg.data.knn_map_size = 3072000
         OmegaConf.set_struct(model.cfg, True)
         trainer.test(model)
         

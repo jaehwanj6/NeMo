@@ -1,21 +1,10 @@
-<<<<<<< Updated upstream
-=======
-
-
->>>>>>> Stashed changes
 defaults:
   - .@base_model: megatron_model_base_config
   - .@delta_model: megatron_model_base_config
   - .@model: megatron_model_base_config
 
-<<<<<<< Updated upstream
 name: mu_transfer_retro
-restore_from_path: null # used when starting from a .nemo file
-=======
-name: test_retro
 restore_from_path: /shared-volume/megatron_retro.nemo # used when starting from a .nemo file
-
->>>>>>> Stashed changes
 
 trainer:
   devices: 2
