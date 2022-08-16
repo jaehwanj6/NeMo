@@ -1,5 +1,5 @@
 name: test_retro
-restore_from_path: null # used when starting from a .nemo file
+restore_from_path: /shared-volume/megatron_retro.nemo # used when starting from a .nemo file
 
 trainer:
   devices: 2
