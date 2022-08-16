@@ -73,8 +73,9 @@ class RETRODataset(Dataset):
         num_samples: int,  # number of data samples,  max_steps * global_batch_size
         seq_length: int,  # input seq length
         seed: int,
-        knn_index: KNNIndex,
+        knn_index,
         retrieval_index: MMapRetrievalIndexedDataset,
+        knn_map_size
     ):
         if not HAVE_APEX:
             raise ImportError(
@@ -84,9 +85,11 @@ class RETRODataset(Dataset):
         super().__init__()
         self.name = name
         self.indexed_dataset: MMapRetrievalIndexedDataset = indexed_dataset
-        self.knn_index: KNNIndex = knn_index
+        # self.knn_index: KNNIndex = knn_index
+        self.knn_index = knn_index
         self.retrieval_index: MMapRetrievalIndexedDataset = retrieval_index
         self.chunk_size = self.indexed_dataset.chunk_size
+        self.knn_map_size = knn_map_size
 
         # make sure seq_length is a multiple of chunk_size
         assert seq_length % self.chunk_size == 0
@@ -102,9 +105,9 @@ class RETRODataset(Dataset):
 
         # save index mappings to a configurable dir
         self.index_mapping_dir = cfg.data.get('index_mapping_dir', None)
-        self.neighbors = cfg.data.get('neighbors', self.knn_index.K)
+        self.neighbors = cfg.data.get('neighbors', self.knn_index[0].K)
         # the number of neighbors cannot exceed the max number of neighbors in the index
-        assert self.neighbors <= self.knn_index.K
+        assert self.neighbors <= self.knn_index[0].K
         # create index_mapping_dir on rank 0
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             if torch.distributed.get_rank() == 0:
@@ -160,7 +163,10 @@ class RETRODataset(Dataset):
         put them into the chunks list
         """
         for i in range(chunk_id, chunk_id + num_chunks):
-            knn = self.knn_index.get_KNN_chunk_ids(i)
+            if len(self.knn_index) == 1: 
+                knn = self.knn_index[0].get_KNN_chunk_ids(i)
+            else: 
+                knn = self.knn_index[i // self.knn_map_size].get_KNN_chunk_ids(i % self.knn_map_size)
             for rid in knn[: self.neighbors]:
                 if rid < 0:
                     # no neighbor, just pad it
@@ -266,6 +272,7 @@ def build_train_valid_test_datasets(
             tokenizer,
             retrieval_prefix,
             knn_map_path[0],
+            cfg.data.knn_map_size
         )
 
     # Blending dataset.
@@ -326,12 +333,14 @@ def _build_train_valid_test_datasets(
     tokenizer,
     retrieval_prefix: str,
     knn_map_path: str,
+    knn_map_size
 ):
     """Build train, valid, and test datasets."""
 
     # Indexed dataset.
     indexed_dataset: MMapRetrievalIndexedDataset = get_indexed_dataset_(data_prefix, data_impl, skip_warmup)
-    knn_index: KNNIndex = KNNIndex(knn_map_path, skip_warmup)
+    # knn_index: KNNIndex = KNNIndex(knn_map_path, skip_warmup)
+    knn_index = [KNNIndex(path, skip_warmup) for path in knn_map_path.split()]
     retrieval_index: MMapRetrievalIndexedDataset = get_indexed_dataset_(retrieval_prefix, data_impl, skip_warmup)
 
     total_num_of_documents = indexed_dataset.sizes.shape[0]
@@ -368,6 +377,7 @@ def _build_train_valid_test_datasets(
                 seed,
                 knn_index,
                 retrieval_index,
+                knn_map_size
             )
         return dataset
 
