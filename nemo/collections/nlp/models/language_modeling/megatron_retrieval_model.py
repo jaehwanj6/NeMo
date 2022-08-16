@@ -17,6 +17,7 @@ from typing import Optional
 
 import torch
 from omegaconf import DictConfig
+from omegaconf.dictconfig import DictConfig
 from pytorch_lightning.plugins.precision.native_amp import NativeMixedPrecisionPlugin
 from pytorch_lightning.trainer.trainer import Trainer
 
@@ -51,6 +52,21 @@ except (ImportError, ModuleNotFoundError):
     ModelType = ApexGuardDefaults()
     HAVE_APEX = False
 
+from typing import Optional, List, Union
+from nemo.collections.nlp.modules.common.transformer.text_generation import (
+    LengthParam,
+    OutputType,
+    SamplingParam,
+    TextGeneration,
+)
+
+from nemo.collections.nlp.modules.common.text_generation_utils import (
+    generate,
+    get_computeprob_response,
+    get_default_length_params,
+    get_default_sampling_params,
+    megatron_gpt_generate,
+)
 
 __all__ = ["MegatronRetrievalModel"]
 
@@ -153,6 +169,7 @@ class MegatronRetrievalModel(MegatronBaseModel):
                 'add_position_embedding', False
             ),  # whether use the absolute postion encoding
             tokenizer=self.tokenizer,
+            # add_embedding_normalization=self.cfg.get('add_embedding_normalization', False), # add extra embedding normalization
         )
         return model
 
@@ -440,3 +457,54 @@ class MegatronRetrievalModel(MegatronBaseModel):
 
     def list_available_models(self):
         pass
+
+    def generate(
+            self,
+            inputs: Union[List[str], torch.Tensor, List[dict]],
+            length_params: LengthParam,
+            sampling_params: SamplingParam = None,
+        ) -> OutputType:
+
+            # check whether the DDP is initialized
+            if parallel_state.is_unitialized():
+
+                def dummy():
+                    return
+
+                if self.trainer.strategy.launcher is not None:
+                    self.trainer.strategy.launcher.launch(dummy, trainer=self.trainer)
+                self.trainer.strategy.setup_environment()
+
+            # set the default sampling params if it is None.
+            # default do greedy sampling
+            if sampling_params is None:
+                sampling_params = get_default_sampling_params()
+
+    def generate(
+            self,
+            inputs: Union[List[str], torch.Tensor, List[dict]],
+            length_params: LengthParam,
+            sampling_params: SamplingParam = None,
+        ) -> OutputType:
+
+            # check whether the DDP is initialized
+            if parallel_state.is_unitialized():
+
+                def dummy():
+                    return
+
+                if self.trainer.strategy.launcher is not None:
+                    self.trainer.strategy.launcher.launch(dummy, trainer=self.trainer)
+                self.trainer.strategy.setup_environment()
+
+            # set the default sampling params if it is None.
+            # default do greedy sampling
+            if sampling_params is None:
+                sampling_params = get_default_sampling_params()
+
+            # set the default length params if it is None.
+            # default do greedy sampling
+            if length_params is None:
+                length_params = get_default_length_params()
+
+            return megatron_gpt_generate(self.cuda(), inputs, self.tokenizer, length_params, sampling_params)
