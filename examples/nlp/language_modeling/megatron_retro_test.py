@@ -20,6 +20,8 @@ from nemo.collections.nlp.models.language_modeling.megatron_retrieval_model impo
 from nemo.collections.nlp.modules.common.transformer.text_generation import LengthParam, SamplingParam
 from nemo.collections.nlp.parts.nlp_overrides import NLPDDPPlugin
 from nemo.core.config import hydra_runner
+from nemo.collections.nlp.modules.common.megatron.mup.shape import set_base_shapes
+from nemo.utils import logging
 # from nemo.collections.nlp.data.language_modeling.megatron.retrieval_service import FaissRetrievalService
 
 
@@ -41,7 +43,7 @@ def main(cfg) -> None:
     # trainer required for restoring model parallel models
     trainer = Trainer(plugins=NLPDDPPlugin(), **cfg.trainer)
 
-    for k in [2,3,4,5,10,20,30,40,50]: 
+    for k in [1, 2,3,4,5,10,20,30,40,50]: 
         model = MegatronRetrievalModel.restore_from(restore_path=cfg.restore_from_path, trainer=trainer)
         OmegaConf.set_struct(model.cfg, False)
         model.cfg.data.neighbors = k
@@ -53,6 +55,24 @@ def main(cfg) -> None:
         model.cfg.data.perplexity_log = '/shared-volume/mutransfer_mc4_perplexity_{}.txt'.format(k)
         # model.cfg.data.knn_map_size = -1
         # model.cfg.data.knn_map_size = 3072000
+        cfg.model.shape_file = '/shared-volume/f0e4c2f76c58916ec258f246851bea09_o1_rel_shape_info.yaml'
+        set_base_shapes(model, cfg.model.shape_file, rescale_params=False)
+        for name, layer in model.model.named_modules():
+            if (
+                name.endswith('.self_attention')
+                or name.endswith('.inter_attention')
+                or name.endswith('.cross_attention')
+                or name.endswith('.core_attention')
+            ):
+                if hasattr(layer, 'norm_factor') and hasattr(layer, 'hidden_size_per_attention_head'):
+                    layer.norm_factor = (
+                        layer.hidden_size_per_attention_head / 8.0
+                    )  # divide 8 to make it consist with ADLR setting
+            else:
+                if hasattr(layer, 'norm_factor') or hasattr(layer, 'hidden_size_per_attention_head'):
+                    logging.error(
+                        f'module {name} has norm factor but its name is not ending with attention, need to double check'
+                    )
         OmegaConf.set_struct(model.cfg, True)
         trainer.test(model)
         
