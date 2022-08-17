@@ -41,7 +41,7 @@ def main(cfg) -> None:
     # trainer required for restoring model parallel models
     trainer = Trainer(plugins=NLPDDPPlugin(), **cfg.trainer)
 
-    for k in [1,2,3,4,5,10,20,30,40,50]: 
+    for k in [2,3,4,5,10,20,30,40,50]: 
         model = MegatronRetrievalModel.restore_from(restore_path=cfg.restore_from_path, trainer=trainer)
         OmegaConf.set_struct(model.cfg, False)
         model.cfg.data.neighbors = k
@@ -49,7 +49,8 @@ def main(cfg) -> None:
         # model.cfg.data.knn_index = [' '.join(['/shared-volume/knn_map_wei_wiki_50_start_{}.idx'.format(el) for el in range(0, 1321, 60)])]
         # model.cfg.data.knn_index = ['/shared-volume/knn_map_wei_wiki.idx']
         model.cfg.data.knn_index = ['/shared-volume/knn_final.save']
-        model.cfg.data.retrieval_prefix = '/shared-volume/retro_wei_wiki_text_document'
+        model.cfg.data.retrieval_prefix = '/shared-volume/retro_mc4_text_document'
+        model.cfg.data.perplexity_log = '/shared-volume/mutransfer_mc4_perplexity_{}.txt'.format(k)
         # model.cfg.data.knn_map_size = -1
         # model.cfg.data.knn_map_size = 3072000
         OmegaConf.set_struct(model.cfg, True)

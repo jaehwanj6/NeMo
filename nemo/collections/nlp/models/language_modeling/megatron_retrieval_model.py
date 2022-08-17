@@ -308,6 +308,7 @@ class MegatronRetrievalModel(MegatronBaseModel):
         # https://towardsdatascience.com/the-relationship-between-perplexity-and-entropy-in-nlp-f81888775ccc
         self.log('perplexity', torch.exp(averaged_loss), prog_bar=True)
         self.log('consumed_samples', self.compute_consumed_samples(self.trainer.global_step - self.init_global_step))
+        
         return averaged_loss
 
     def test_step(self, batch, batch_idx):
@@ -316,9 +317,14 @@ class MegatronRetrievalModel(MegatronBaseModel):
     def test_epoch_end(self, outputs):
         averaged_loss = average_losses_across_data_parallel_group(outputs)
         logging.info(f'test_loss: {averaged_loss[0]}')
-        self.log(
-            'consumed_samples', self.compute_consumed_samples(self.trainer.global_step - self.init_global_step),
-        )
+        # self.log(
+        #     'consumed_samples', self.compute_consumed_samples(self.trainer.global_step - self.init_global_step),
+        # )
+        averaged_loss = torch.stack(outputs).mean()
+        perplexity = torch.exp(averaged_loss)
+        self.log('perplexity', torch.exp(perplexity), prog_bar=True)
+        with open(self.cfg.data.perplexity_log, 'w') as f: 
+            f.write(str(float(perplexity)))
         return averaged_loss
 
     def build_train_valid_test_datasets(self):
