@@ -43,7 +43,8 @@ def main(cfg) -> None:
     # trainer required for restoring model parallel models
     trainer = Trainer(plugins=NLPDDPPlugin(), **cfg.trainer)
 
-    for k in [1, 2,3,4,5,10,20,30,40,50]: 
+    for k in [20,30,40,50]: 
+        print('-' * 30 + 'k: ' + str(k))
         model = MegatronRetrievalModel.restore_from(restore_path=cfg.restore_from_path, trainer=trainer)
         OmegaConf.set_struct(model.cfg, False)
         model.cfg.data.neighbors = k
